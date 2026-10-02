@@ -17,6 +17,9 @@ jobs:
       - name: Security boundary regression tests
         run: python3 scripts/test_bq_cost_gate_security.py
 
+      - name: bq-inspect runner selection regression test
+        run: python3 scripts/test_bq_inspect_runner.py
+
       - name: actionlint
         uses: docker://rhysd/actionlint:1.7.7
         with:
