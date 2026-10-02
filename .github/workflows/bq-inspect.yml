@@ -1,8 +1,9 @@
 # Reusable: on-demand, read-only BigQuery governance inspection. Runs the CALLER repo's
 # FR-4 inspection engine (secure-ga4-bq-template `src/modules/inspection`, canonical entry
-# `make inspect`) against a live project and publishes the deterministic 11-checkpoint
-# report. It never mutates anything — the inspector SA carries a read-only custom role
-# (FR-6); a dry-run/setCategory is impossible on this path by construction.
+# `task inspect`, or `make inspect` for a caller without a root Taskfile.yml) against a
+# live project and publishes the deterministic 11-checkpoint report. It never mutates
+# anything — the inspector SA carries a read-only custom role (FR-6); a
+# dry-run/setCategory is impossible on this path by construction.
 #
 # Keyless auth (OIDC/WIF). Unlike bq-cost-gate this needs NO setup-gcloud: the engine
 # reaches GCP through google-api-python-client (googleapiclient discovery) via
@@ -32,7 +33,7 @@ on:
         required: true
         type: string
       params_file:
-        description: "Engagement parameters YAML (FR-7); passed to `make inspect PARAMS=`"
+        description: "Engagement parameters YAML (FR-7); passed to the caller's inspect target as PARAMS="
         required: false
         type: string
         default: "inspection-params.yml"
@@ -62,26 +63,48 @@ jobs:
           service_account: ${{ inputs.service_account }}
 
       # The engine is uv-managed; runners ship neither uv nor the deps (mirror the
-      # asset template's own CI, which drives every stack through canonical make targets).
+      # asset template's own CI, which drives every stack through its canonical targets).
       - uses: astral-sh/setup-uv@v6
 
+      - name: Select the caller's canonical runner
+        id: runner
+        # ai-dev-foundation ADR-0026 moves canonical targets from make to go-task. A caller
+        # with a root Taskfile.yml runs them with task; a caller without one keeps make.
+        run: |
+          if [ -f Taskfile.yml ]; then
+            echo "name=task" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=make" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install go-task
+        # The caller's own action pins the go-task version and checksum (ADR-0026), so this
+        # workflow carries no second pin.
+        if: steps.runner.outputs.name == 'task'
+        uses: ./scripts/actions/setup-task
+
       - name: Install toolchain
-        run: make setup
+        env:
+          RUNNER: ${{ steps.runner.outputs.name }}
+        run: |
+          "$RUNNER" setup
 
       - name: Run FR-4 inspection (read-only)
         # Inputs pass through env, never inlined into the shell — blocks script injection
-        # from an operator-supplied fail_on and matches bq-cost-gate.yml. Empty FAIL_ON is
-        # a no-op in the Makefile ($(if $(FAIL_ON),...)) — report-only.
+        # from an operator-supplied fail_on and matches bq-cost-gate.yml. An empty FAIL_ON
+        # adds no flag in the caller's inspect target — report-only.
         env:
+          RUNNER: ${{ steps.runner.outputs.name }}
           PARAMS_FILE: ${{ inputs.params_file }}
           OUT_DIR: ${{ inputs.out_dir }}
           FAIL_ON: ${{ inputs.fail_on }}
         run: |
-          make inspect PARAMS="$PARAMS_FILE" OUT="$OUT_DIR" FAIL_ON="$FAIL_ON"
+          "$RUNNER" inspect PARAMS="$PARAMS_FILE" OUT="$OUT_DIR" FAIL_ON="$FAIL_ON"
 
       - name: Render deterministic remediation draft
         if: always()
         env:
+          RUNNER: ${{ steps.runner.outputs.name }}
           OUT_DIR: ${{ inputs.out_dir }}
         run: |
           findings="$(find "$OUT_DIR" -name findings.json 2>/dev/null | sort | tail -n1)"
@@ -89,7 +112,7 @@ jobs:
             echo "No findings artifact exists; skipping the remediation draft."
             exit 0
           fi
-          make remediation-draft FINDINGS="$findings" OUT="$(dirname "$findings")"
+          "$RUNNER" remediation-draft FINDINGS="$findings" OUT="$(dirname "$findings")"
 
       - name: Append report to job summary
         if: always()
